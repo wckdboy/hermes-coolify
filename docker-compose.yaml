@@ -1,4 +1,7 @@
-# Hermes Agent for Coolify — 2026-10-05
+# Hermes Agent for Coolify — Nous Portal login — revision 2, 2026-10-05
+# First register https://YOUR-DASHBOARD-DOMAIN/auth/callback at:
+# https://portal.nousresearch.com/local-dashboards
+# Then paste the agent:... client ID into Coolify and deploy.
 # Read DEPLOYMENT.md before deploying. Phase 1: owner-only deployment.
 # Phase 2: REMOVE the public :8642 domain and SERVICE_URL_HERMES_8642,
 # then expose your authenticated app backend instead. Never ship API_SERVER_KEY.
@@ -31,7 +34,7 @@ services:
       - python
       - -c
       - |
-        import ipaddress, json, os
+        import ipaddress, json, os, tempfile
         from pathlib import Path
         root = Path('/opt/data')
         target = root / 'config.yaml'
@@ -72,8 +75,9 @@ services:
         workspace.mkdir(mode=0o700, exist_ok=True)
         os.chown(workspace, 10000, 10000)
         os.umask(0o077)
-        temporary = root / '.config.bootstrap.tmp'
-        with temporary.open('x') as f:
+        # A unique name allows retry after an interrupted first deployment.
+        with tempfile.NamedTemporaryFile(mode='w', dir=root, prefix='.config.bootstrap.', delete=False) as f:
+            temporary = Path(f.name)
             json.dump(config, f, indent=2)
             f.write('\n')
             f.flush()
@@ -112,12 +116,9 @@ services:
       HERMES_DASHBOARD: "1"
       HERMES_DASHBOARD_HOST: 0.0.0.0
       HERMES_DASHBOARD_PORT: "9119"
-      # Public dashboard: use OIDC with MFA and restrict app access in your IdP.
-      # Register a PUBLIC authorization-code + PKCE/S256 client (no secret).
-      # Redirect URI: https://hermes.example.com/auth/callback
-      HERMES_DASHBOARD_OIDC_ISSUER: ${HERMES_DASHBOARD_OIDC_ISSUER:?}
-      HERMES_DASHBOARD_OIDC_CLIENT_ID: ${HERMES_DASHBOARD_OIDC_CLIENT_ID:?}
-      HERMES_DASHBOARD_OIDC_SCOPES: openid profile email
+      # Nous Portal authenticates the dashboard; model providers stay independent.
+      # Value must be the agent:... ID returned by Local Dashboards registration.
+      HERMES_DASHBOARD_OAUTH_CLIENT_ID: ${HERMES_DASHBOARD_OAUTH_CLIENT_ID:?}
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_KEY: ${SERVICE_PASSWORD_64_HERMESAPI}
@@ -144,14 +145,28 @@ services:
         - CMD
         - python
         - -c
-        - >-
-          import json, urllib.request;
-          api=json.load(urllib.request.urlopen('http://127.0.0.1:8642/health',timeout=4));
-          ui=json.load(urllib.request.urlopen('http://127.0.0.1:9119/api/status',timeout=4));
-          assert api.get('status') == 'ok';
+        - |
+          import json, os, urllib.request, urllib.error
+          def get(url, headers=None):
+              request = urllib.request.Request(url, headers=headers or {})
+              with urllib.request.urlopen(request, timeout=3) as response:
+                  return json.load(response)
+          api = 'http://127.0.0.1:8642'
+          assert get(api + '/health').get('status') == 'ok'
+          ui = get('http://127.0.0.1:9119/api/status')
           assert ui.get('auth_required') is True
+          assert 'nous' in ui.get('auth_providers', [])
+          key = os.environ.get('API_SERVER_KEY', '')
+          assert len(key) >= 32, 'Missing strong API key'
+          get(api + '/v1/models', {'Authorization': 'Bearer ' + key})
+          try:
+              get(api + '/v1/models')
+          except urllib.error.HTTPError as error:
+              assert error.code == 401
+          else:
+              raise SystemExit('API unexpectedly accepted an unauthenticated request')
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       start_period: 180s
       retries: 5
     logging:
