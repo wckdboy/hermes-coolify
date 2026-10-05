@@ -1,4 +1,4 @@
-# Hermes Agent for Coolify — Nous Portal login — revision 2, 2026-10-05
+# Hermes Agent for Coolify — Nous Portal login — revision 3, 2026-10-05
 # First register https://YOUR-DASHBOARD-DOMAIN/auth/callback at:
 # https://portal.nousresearch.com/local-dashboards
 # Then paste the agent:... client ID into Coolify and deploy.
@@ -87,8 +87,9 @@ services:
         print('Seeded config with provider key references; no provider secrets written.')
 
   hermes:
-    # After acceptance testing, set HERMES_IMAGE to the accepted sha256 digest.
-    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:stable}
+    # Verified published release tag. A saved Coolify HERMES_IMAGE overrides this default.
+    # Change any existing :stable override to :v2026.9.24 before redeploying.
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.9.24}
     command: ["gateway", "run"]
     restart: unless-stopped
     stop_grace_period: 60s
@@ -110,7 +111,8 @@ services:
       # Internal port suffixes are Coolify routing hints, not public HTTPS ports.
       SERVICE_URL_HERMES_9119: /
       SERVICE_URL_HERMES_8642: /
-      HERMES_DASHBOARD_PUBLIC_URL: ${SERVICE_URL_HERMES_9119}
+      # Explicit external URL, e.g. https://hermes.example.com (no :9119 suffix).
+      HERMES_DASHBOARD_PUBLIC_URL: ${HERMES_DASHBOARD_PUBLIC_URL:?}
       TZ: ${TZ:-Europe/Copenhagen}
       HERMES_HOME: /opt/data
       HERMES_DASHBOARD: "1"
@@ -121,7 +123,7 @@ services:
       HERMES_DASHBOARD_OAUTH_CLIENT_ID: ${HERMES_DASHBOARD_OAUTH_CLIENT_ID:?}
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
-      API_SERVER_KEY: ${SERVICE_PASSWORD_64_HERMESAPI}
+      API_SERVER_KEY: ${SERVICE_PASSWORD_64_HERMESAPI:?}
       API_SERVER_MODEL_NAME: hermes-agent
       # Native iOS networking needs no CORS. No wildcard browser access.
       API_SERVER_CORS_ORIGINS: ""
