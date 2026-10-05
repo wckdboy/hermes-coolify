@@ -1,0 +1,164 @@
+# Hermes Agent for Coolify — 2026-10-05
+# Read DEPLOYMENT.md before deploying. Phase 1: owner-only deployment.
+# Phase 2: REMOVE the public :8642 domain and SERVICE_URL_HERMES_8642,
+# then expose your authenticated app backend instead. Never ship API_SERVER_KEY.
+# Coolify owns TLS, proxy labels and the resource network. No host ports/socket.
+services:
+  bootstrap:
+    image: python:3.14-alpine
+    restart: "no"
+    exclude_from_hc: true
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    mem_limit: 128m
+    pids_limit: 32
+    environment:
+      HERMES_INITIAL_PROVIDER: ${HERMES_INITIAL_PROVIDER:-deepseek}
+      HERMES_INITIAL_MODEL: ${HERMES_INITIAL_MODEL:-deepseek-flash}
+      # Exact Coolify proxy IP(s), comma separated; no wildcard networks.
+      HERMES_TRUSTED_PROXIES: ${HERMES_TRUSTED_PROXIES:?}
+    volumes:
+      - hermes-data:/opt/data
+    command:
+      - python
+      - -c
+      - |
+        import ipaddress, json, os
+        from pathlib import Path
+        root = Path('/opt/data')
+        target = root / 'config.yaml'
+        if target.exists():
+            print('Existing config preserved; edit it in the dashboard.')
+            raise SystemExit(0)
+        proxies = [s.strip() for s in os.environ['HERMES_TRUSTED_PROXIES'].split(',') if s.strip()]
+        if not proxies:
+            raise SystemExit('HERMES_TRUSTED_PROXIES must contain the proxy IP')
+        for proxy in proxies:
+            address = ipaddress.ip_address(proxy)
+            if address.is_unspecified or address.is_multicast:
+                raise SystemExit('Proxy must be a specific unicast IP')
+        providers = {
+            'deepseek': {'api': 'https://api.deepseek.com', 'key_env': 'DEEPSEEK_API_KEY'},
+            'abliteration': {'api': 'https://api.abliteration.ai/v1', 'key_env': 'ABLITERATION_API_KEY'},
+            'deepinfra': {'api': 'https://api.deepinfra.com/v1/openai', 'key_env': 'DEEPINFRA_API_KEY'},
+            'orcarouter': {'api': 'https://api.orcarouter.ai/v1', 'key_env': 'ORCAROUTER_API_KEY'},
+            'openrouter': {'api': 'https://openrouter.ai/api/v1', 'key_env': 'OPENROUTER_API_KEY'},
+        }
+        selected = os.environ['HERMES_INITIAL_PROVIDER'].strip()
+        model = os.environ['HERMES_INITIAL_MODEL'].strip()
+        if selected not in providers or not model:
+            raise SystemExit('Choose a listed initial provider and nonempty model ID')
+        config = {
+            'model': {'provider': 'custom:' + selected, 'default': model},
+            'providers': providers,
+            'terminal': {'backend': 'local', 'cwd': '/opt/data/workspace'},
+            'dashboard': {'trusted_proxies': proxies},
+            'gateway': {'allow_all_users': False, 'api_server': {'max_concurrent_runs': 2}},
+            'tool_loop_guardrails': {'non_interactive_hard_stop_enabled': True},
+        }
+        # JSON is valid YAML; the official image migrates this into current YAML.
+        # Only seed a NEW installation. Never overwrite settings on redeploy.
+        os.chmod(root, 0o700)
+        os.chown(root, 10000, 10000)
+        workspace = root / 'workspace'
+        workspace.mkdir(mode=0o700, exist_ok=True)
+        os.chown(workspace, 10000, 10000)
+        os.umask(0o077)
+        temporary = root / '.config.bootstrap.tmp'
+        with temporary.open('x') as f:
+            json.dump(config, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chown(temporary, 10000, 10000)
+        os.replace(temporary, target)
+        print('Seeded config with provider key references; no provider secrets written.')
+
+  hermes:
+    # After acceptance testing, set HERMES_IMAGE to the accepted sha256 digest.
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:stable}
+    command: ["gateway", "run"]
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    # Preserve the official root bootstrap + non-root supervised services.
+    # Do not add user:, init:true, read_only:true or replace its entrypoint.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    mem_limit: ${HERMES_MEMORY_LIMIT:-4g}
+    cpus: ${HERMES_CPU_LIMIT:-2.0}
+    pids_limit: 512
+    shm_size: 256m
+    environment:
+      # Domains: https://hermes.example.com:9119,https://agent-api.example.com:8642
+      # Internal port suffixes are Coolify routing hints, not public HTTPS ports.
+      SERVICE_URL_HERMES_9119: /
+      SERVICE_URL_HERMES_8642: /
+      HERMES_DASHBOARD_PUBLIC_URL: ${SERVICE_URL_HERMES_9119}
+      TZ: ${TZ:-Europe/Copenhagen}
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "9119"
+      # Public dashboard: use OIDC with MFA and restrict app access in your IdP.
+      # Register a PUBLIC authorization-code + PKCE/S256 client (no secret).
+      # Redirect URI: https://hermes.example.com/auth/callback
+      HERMES_DASHBOARD_OIDC_ISSUER: ${HERMES_DASHBOARD_OIDC_ISSUER:?}
+      HERMES_DASHBOARD_OIDC_CLIENT_ID: ${HERMES_DASHBOARD_OIDC_CLIENT_ID:?}
+      HERMES_DASHBOARD_OIDC_SCOPES: openid profile email
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_KEY: ${SERVICE_PASSWORD_64_HERMESAPI}
+      API_SERVER_MODEL_NAME: hermes-agent
+      # Native iOS networking needs no CORS. No wildcard browser access.
+      API_SERVER_CORS_ORIGINS: ""
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS:?}
+      TELEGRAM_ALLOW_ALL_USERS: "false"
+      GATEWAY_ALLOW_ALL_USERS: "false"
+      # Configure at least the selected provider's key. Others are optional.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ABLITERATION_API_KEY: ${ABLITERATION_API_KEY:-}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+      ORCAROUTER_API_KEY: ${ORCAROUTER_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - hermes-data:/opt/data
+    expose:
+      - "9119"
+      - "8642"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          api=json.load(urllib.request.urlopen('http://127.0.0.1:8642/health',timeout=4));
+          ui=json.load(urllib.request.urlopen('http://127.0.0.1:9119/api/status',timeout=4));
+          assert api.get('status') == 'ok';
+          assert ui.get('auth_required') is True
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  hermes-data:
